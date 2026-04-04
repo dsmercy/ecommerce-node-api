@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(timeout 5 node src/app.js)",
+      "Bash(node -e \"import\\('./src/config/env.js'\\).then\\(m => console.log\\('env OK:', JSON.stringify\\({port: m.env.port, nodeEnv: m.env.nodeEnv}\\)\\)\\)\")",
+      "Bash(node -e ':*)"
+    ]
+  }
+}
