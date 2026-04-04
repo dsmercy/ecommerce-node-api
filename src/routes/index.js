@@ -1,11 +1,18 @@
 import { Router } from 'express';
+import authRoutes from './auth.routes.js';
+import productRoutes from './product.routes.js';
+import categoryRoutes from './category.routes.js';
 
 const router = Router();
 
-// Stub — routes will be wired up in subsequent phases
-router.use('/auth', (req, res) => res.status(200).json({ message: 'Auth routes coming soon' }));
-router.use('/products', (req, res) => res.status(200).json({ message: 'Product routes coming soon' }));
-router.use('/categories', (req, res) => res.status(200).json({ message: 'Category routes coming soon' }));
+// Phase 3 — Auth
+router.use('/auth', authRoutes);
+
+// Phase 4 — Products & Categories
+router.use('/products', productRoutes);
+router.use('/categories', categoryRoutes);
+
+// Stubs — wired up in subsequent phases
 router.use('/cart', (req, res) => res.status(200).json({ message: 'Cart routes coming soon' }));
 router.use('/orders', (req, res) => res.status(200).json({ message: 'Order routes coming soon' }));
 router.use('/reviews', (req, res) => res.status(200).json({ message: 'Review routes coming soon' }));

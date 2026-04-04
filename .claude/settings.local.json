@@ -5,7 +5,13 @@
       "Bash(timeout 5 node src/app.js)",
       "Bash(node -e \"import\\('./src/config/env.js'\\).then\\(m => console.log\\('env OK:', JSON.stringify\\({port: m.env.port, nodeEnv: m.env.nodeEnv}\\)\\)\\)\")",
       "Bash(node -e ':*)",
-      "Bash(node test-models.js)"
+      "Bash(node test-models.js)",
+      "Bash(node src/app.js)",
+      "Bash(curl -s -X POST http://localhost:5000/api/auth/register -H 'Content-Type: application/json' -d '{\"email\":\"customer@test.com\",\"password\":\"Password@123\",\"firstName\":\"Test\",\"lastName\":\"User\"}')",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); const j=JSON.parse\\(d\\); console.log\\(JSON.stringify\\({success:j.success,message:j.message,role:j.data?.user?.role},null,2\\)\\); process.stdout.write\\('ACCESS_TOKEN='+j.data?.tokens?.accessToken+'\\\\nREFRESH_TOKEN='+j.data?.tokens?.refreshToken+'\\\\n'\\)\")",
+      "Bash(curl -s -X DELETE \"http://localhost:5000/api/auth/register\")",
+      "Bash(npx kill-port:*)",
+      "Bash(taskkill /F /IM node.exe)"
     ]
   }
 }
