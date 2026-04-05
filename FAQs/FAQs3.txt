@@ -1,0 +1,485 @@
+Here is your **clean interview format** with each **question followed immediately by its answer** — ready to revise or memorize.
+
+---
+
+# 🔹 Node.js Interview Q&A (Mid-Level)
+
+---
+
+## 1. Node.js Fundamentals & Async Logic
+
+### 1. Explain the difference between `module.exports` and `export default`.
+
+**Answer:**
+`module.exports` is used in CommonJS (default in Node.js), while `export default` is used in ES Modules.
+They differ in syntax and import style:
+
+* CommonJS → `require()`
+* ES Modules → `import`
+
+---
+
+### 2. What is the purpose of `package-lock.json`? Why shouldn't you delete it?
+
+**Answer:**
+It locks dependency versions to ensure consistent installs across environments.
+Deleting it can cause version mismatches and unexpected bugs.
+
+---
+
+### 3. Explain how `EventEmitter` works. Give a real-world use case.
+
+**Answer:**
+`EventEmitter` allows you to emit and listen to events.
+Use case: triggering actions like logging, notifications, or background jobs after events (e.g., user login).
+
+---
+
+### 4. How do you convert a callback-based function to a Promise-based one?
+
+**Answer:**
+Use `util.promisify()` or native promise-based APIs:
+
+```js
+const util = require('util');
+const fn = util.promisify(callbackFn);
+```
+
+---
+
+### 5. What is Callback Hell, and how do modern JavaScript features solve it?
+
+**Answer:**
+Callback hell is deeply nested callbacks making code unreadable.
+Solved using:
+
+* Promises
+* async/await
+
+---
+
+### 6. What happens if you have an infinite loop in Node.js?
+
+**Answer:**
+It blocks the event loop, making the application unresponsive.
+
+---
+
+### 7. Difference between `path.join()` and `path.resolve()`?
+
+**Answer:**
+
+* `join()` → concatenates paths
+* `resolve()` → returns absolute path
+
+---
+
+### 8. Explain `os` and `fs` modules.
+
+**Answer:**
+
+* `os` → system info (CPU, memory)
+* `fs` → file operations (read/write/delete)
+
+---
+
+### 9. How does Node.js handle concurrency?
+
+**Answer:**
+Through Event Loop + async I/O using libuv thread pool.
+
+---
+
+### 10. Difference between `__dirname` and `process.cwd()`?
+
+**Answer:**
+
+* `__dirname` → current file location
+* `process.cwd()` → where Node process started
+
+---
+
+## 2. API Development
+
+### 11. What is Middleware in Express?
+
+**Answer:**
+Functions executed during request lifecycle.
+Types:
+
+* Built-in (`express.json()`)
+* Third-party (`cors`)
+* Custom (auth/logging)
+
+---
+
+### 12. How do you handle file uploads?
+
+**Answer:**
+Using libraries like Multer:
+
+```js
+upload.single('file')
+```
+
+---
+
+### 13. Difference between `req.params`, `req.query`, and `req.body`?
+
+**Answer:**
+
+* `params` → route params
+* `query` → URL query string
+* `body` → request payload
+
+---
+
+### 14. How do you implement CORS?
+
+**Answer:**
+Using `cors` middleware:
+
+```js
+app.use(cors());
+```
+
+---
+
+### 15. REST API naming best practices?
+
+**Answer:**
+
+* Use nouns, not verbs
+* Use plural resources (`/users`)
+* Use proper HTTP methods
+
+---
+
+### 16. How do you handle 404 and global errors?
+
+**Answer:**
+
+```js
+app.use((req,res)=>res.status(404).send());
+
+app.use((err,req,res,next)=>{
+  res.status(500).json({message: err.message});
+});
+```
+
+---
+
+### 17. Difference between `app.use()` and `app.all()`?
+
+**Answer:**
+
+* `app.use()` → middleware for all routes
+* `app.all()` → handles all HTTP methods for a route
+
+---
+
+### 18. How do you validate request data?
+
+**Answer:**
+Using libraries like Joi or Zod to validate schemas before processing.
+
+---
+
+### 19. Purpose of Helmet?
+
+**Answer:**
+Adds security headers to protect against common vulnerabilities.
+
+---
+
+### 20. How do you serve static files?
+
+**Answer:**
+
+```js
+app.use(express.static('public'));
+```
+
+---
+
+## 3. Database & Data Management
+
+### 21. What is ORM/ODM?
+
+**Answer:**
+Tools to interact with DB using objects instead of queries.
+Examples: Sequelize, Prisma, Mongoose
+
+---
+
+### 22. How to prevent SQL Injection?
+
+**Answer:**
+
+* Use parameterized queries
+* Use ORM
+* Validate inputs
+
+---
+
+### 23. Difference between `find()` and `findOne()`?
+
+**Answer:**
+
+* `find()` → returns array
+* `findOne()` → returns single document
+
+---
+
+### 24. How do you handle migrations?
+
+**Answer:**
+Using tools like Sequelize CLI or Prisma migrations to version DB changes.
+
+---
+
+### 25. What is indexing?
+
+**Answer:**
+Speeds up queries by reducing scan time. Improves performance.
+
+---
+
+### 26. Many-to-Many relationship?
+
+**Answer:**
+
+* SQL → join table
+* NoSQL → embedded arrays or references
+
+---
+
+### 27. Internal Join vs Left Join?
+
+**Answer:**
+
+* Inner Join → matching records only
+* Left Join → all left + matching right
+
+---
+
+### 28. How do you use Redis for caching?
+
+**Answer:**
+Store frequently accessed data:
+
+```js
+redis.set(key, value)
+redis.get(key)
+```
+
+---
+
+### 29. Soft Delete vs Hard Delete?
+
+**Answer:**
+
+* Soft → mark as deleted
+* Hard → remove permanently
+
+---
+
+### 30. How to handle race conditions?
+
+**Answer:**
+
+* DB transactions
+* Locks
+* Optimistic concurrency
+
+---
+
+## 4. Authentication & Security
+
+### 31. How does JWT work?
+
+**Answer:**
+Server generates token → client stores → sends in headers → server verifies.
+
+---
+
+### 32. Where to store JWT?
+
+**Answer:**
+
+* Best: HTTP-only cookies
+* Avoid: LocalStorage (XSS risk)
+
+---
+
+### 33. What is bcrypt?
+
+**Answer:**
+Password hashing library with salting for security.
+
+---
+
+### 34. Authentication vs Authorization?
+
+**Answer:**
+
+* Auth → who you are
+* Authorization → what you can access
+
+---
+
+### 35. How to implement RBAC?
+
+**Answer:**
+Assign roles → map roles to permissions → check in middleware.
+
+---
+
+### 36. What is OAuth 2.0?
+
+**Answer:**
+Third-party authentication (Google, GitHub login).
+
+---
+
+### 37. Prevent XSS?
+
+**Answer:**
+
+* Sanitize input
+* Escape output
+* Use secure headers
+
+---
+
+### 38. What is CSRF?
+
+**Answer:**
+Unauthorized requests using user session.
+Prevent using CSRF tokens.
+
+---
+
+### 39. Manage API keys securely?
+
+**Answer:**
+
+* Store in `.env`
+* Use secret managers
+* Never commit to Git
+
+---
+
+### 40. Purpose of `express-rate-limit`?
+
+**Answer:**
+Prevents abuse by limiting requests per IP.
+
+---
+
+## 5. Testing & Debugging
+
+### 41. Unit vs Integration Testing?
+
+**Answer:**
+
+* Unit → test single function
+* Integration → test full flow
+
+---
+
+### 42. Testing libraries?
+
+**Answer:**
+Jest, Mocha, Chai, Supertest
+
+---
+
+### 43. How to test APIs with external services?
+
+**Answer:**
+Use mocking tools (e.g., Jest mocks, Nock)
+
+---
+
+### 44. `console.time()` usage?
+
+**Answer:**
+Measure execution time:
+
+```js
+console.time('test');
+console.timeEnd('test');
+```
+
+---
+
+### 45. What is `debugger`?
+
+**Answer:**
+Pauses execution for debugging in DevTools/VS Code.
+
+---
+
+### 46. Logging in production?
+
+**Answer:**
+Use tools like Winston, Morgan, or external services like Sentry.
+
+---
+
+### 47. Check outdated dependencies?
+
+**Answer:**
+
+```bash
+npm outdated
+```
+
+---
+
+## 6. Tools & Deployment
+
+### 48. What is PM2?
+
+**Answer:**
+Process manager for Node.js (auto restart, clustering).
+
+---
+
+### 49. dependencies vs devDependencies?
+
+**Answer:**
+
+* dependencies → needed in production
+* devDependencies → dev tools only
+
+---
+
+### 50. Docker for Node.js?
+
+**Answer:**
+Containerizes app for consistent environments.
+
+---
+
+### 51. CI/CD pipeline?
+
+**Answer:**
+Code → Build → Test → Deploy automatically.
+
+---
+
+### 52. Environment variables?
+
+**Answer:**
+Store configs (API keys, DB URL) securely using `.env`.
+
+---
+
+### 53. Hot Reloading?
+
+**Answer:**
+Using Nodemon to auto-restart server on file changes.
+
+---

@@ -17,7 +17,11 @@
       "Bash(python -c \"import sys,json; print\\(json.load\\(sys.stdin\\)\\)\")",
       "Bash(netstat -ano)",
       "Bash(taskkill /PID 17556 /F)",
-      "Bash(cmd //c \"taskkill /PID 17556 /F\")"
+      "Bash(cmd //c \"taskkill /PID 17556 /F\")",
+      "Bash(python -c \"import sys; line=sys.stdin.read\\(\\).strip\\(\\); print\\(line.split\\(\\)[-1] if line else ''\\)\")",
+      "Bash(xargs -I{} cmd //c \"taskkill /PID {} /F\" sleep 2 cd c:/Daya/Node/ecommerce-node-api)",
+      "Bash(python -c \"import sys,json; print\\('server:', json.load\\(sys.stdin\\)['data']['status']\\)\")",
+      "Bash(node --input-type=module)"
     ]
   }
 }

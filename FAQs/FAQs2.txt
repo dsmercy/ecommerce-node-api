@@ -1,0 +1,1990 @@
+================================================================================
+   SENIOR NODE.JS BACKEND DEVELOPER — INTERVIEW QUESTIONS & ANSWERS
+   Based on: E-Commerce REST API (Express + Mongoose + JWT + Stripe)
+================================================================================
+
+60 questions covering Node.js Core, Express, MongoDB, Auth, Security,
+Caching, Testing, REST Design, and Project-specific deep dives.
+
+================================================================================
+  PART 1 — NODE.JS CORE & EVENT LOOP
+================================================================================
+
+------------------------------------------------------------------------
+Q1. Explain the Node.js architecture and why it is suited for APIs.
+------------------------------------------------------------------------
+
+ANSWER:
+  Node.js runs on a single-threaded event loop powered by the V8 engine
+  and libuv. It is suited for I/O-heavy workloads (API servers, databases,
+  file systems) because it never blocks the thread waiting for I/O —
+  instead it offloads I/O to the OS and resumes execution via callbacks
+  when the operation completes.
+
+  Three layers:
+    1. V8          → executes JavaScript
+    2. libuv       → provides the event loop + thread pool (4 threads default)
+    3. Node APIs   → fs, http, crypto, etc., which bridge JS to libuv
+
+  Why suited for APIs:
+    - Database queries (MongoDB) are I/O → non-blocking
+    - HTTP calls (Stripe) are I/O → non-blocking
+    - Thousands of requests can be handled concurrently on one thread
+
+  NOT suited for:
+    - CPU-intensive tasks (image processing, ML inference)
+    - Synchronous loops over large datasets
+    These block the event loop and freeze ALL requests.
+
+  Project relevance:
+    In this ecommerce API, every request (checkout, product search, etc.)
+    makes multiple DB calls and a Stripe API call. Because these are all
+    async/await, they are non-blocking and the event loop stays free.
+
+------------------------------------------------------------------------
+Q2. Describe the 6 phases of the Node.js Event Loop in order.
+------------------------------------------------------------------------
+
+ANSWER:
+  The event loop processes callbacks in this fixed order each iteration:
+
+  Phase 1 — TIMERS
+    Executes callbacks scheduled by setTimeout() and setInterval()
+    whose delay has expired.
+
+  Phase 2 — PENDING CALLBACKS
+    Executes I/O callbacks deferred from the previous iteration
+    (e.g., TCP errors).
+
+  Phase 3 — IDLE / PREPARE
+    Internal use only.
+
+  Phase 4 — POLL
+    Retrieves new I/O events and executes their callbacks.
+    If no timers are pending, waits here for I/O.
+    This is where most of your code runs (DB results, HTTP responses).
+
+  Phase 5 — CHECK
+    Executes setImmediate() callbacks.
+
+  Phase 6 — CLOSE CALLBACKS
+    Executes close events (e.g., socket.on('close')).
+
+  MICROTASKS run between every phase:
+    - process.nextTick() callbacks  (higher priority)
+    - Promise.then() callbacks      (lower priority, but still before next phase)
+
+  Interview trap:
+    process.nextTick() runs before Promises even though both are microtasks.
+    Overusing nextTick can starve the event loop.
+
+------------------------------------------------------------------------
+Q3. What is the difference between process.nextTick() and setImmediate()?
+------------------------------------------------------------------------
+
+ANSWER:
+  process.nextTick():
+    - Runs before the event loop continues to the next phase
+    - Runs before any I/O, timers, or setImmediate
+    - Part of the microtask queue
+
+  setImmediate():
+    - Runs in the CHECK phase (after POLL)
+    - Runs after I/O callbacks in the current iteration
+
+  Example:
+    setImmediate(() => console.log('setImmediate'));
+    process.nextTick(() => console.log('nextTick'));
+    // Output: nextTick → setImmediate
+
+  When to use:
+    - nextTick: emit events after current function completes but before I/O
+    - setImmediate: break up long operations without blocking I/O
+
+  Warning:
+    Recursive nextTick calls will starve I/O and lock the event loop.
+
+------------------------------------------------------------------------
+Q4. What is the difference between callbacks, Promises, and async/await?
+------------------------------------------------------------------------
+
+ANSWER:
+  CALLBACKS (old style):
+    fs.readFile('file', (err, data) => {
+      if (err) handle(err);
+      doSomething(data);
+    });
+    Problem: Callback hell — deeply nested, hard to read and catch errors.
+
+  PROMISES:
+    readFile('file')
+      .then(data => doSomething(data))
+      .catch(err => handle(err));
+    Better: chainable, single .catch() for all errors.
+    Problem: .then() chains can still be verbose.
+
+  ASYNC/AWAIT (used in this project):
+    async function handler() {
+      try {
+        const data = await readFile('file');
+        doSomething(data);
+      } catch (err) {
+        handle(err);
+      }
+    }
+    Best: reads like synchronous code, easy error handling with try/catch.
+
+  Project usage:
+    Every service function in this API uses async/await.
+    Example from order.service.js:
+      const cart = await Cart.findOne({ userId }).populate('items.productId');
+
+------------------------------------------------------------------------
+Q5. What happens when you throw an error inside an async function?
+------------------------------------------------------------------------
+
+ANSWER:
+  An unhandled error inside async/await becomes a rejected Promise.
+  If not caught, it triggers an UnhandledPromiseRejection.
+
+  In Express, async errors must be passed to next():
+    async function getProduct(req, res, next) {
+      try {
+        const product = await productService.getById(req.params.id);
+        apiResponse(res, product);
+      } catch (err) {
+        next(err);  // passes to global error middleware
+      }
+    }
+
+  Without the try/catch + next(err), Express never handles the error
+  and the request hangs or the process crashes.
+
+  This pattern is used consistently in every controller in this project.
+
+================================================================================
+  PART 2 — EXPRESS & MIDDLEWARE
+================================================================================
+
+------------------------------------------------------------------------
+Q6. How does Express middleware work? What is the middleware pipeline?
+------------------------------------------------------------------------
+
+ANSWER:
+  Express middleware is a function with signature: (req, res, next).
+  Each middleware can:
+    - Read/modify req or res
+    - End the request-response cycle (res.json, res.send)
+    - Pass control to the next middleware via next()
+    - Pass an error via next(err)
+
+  Pipeline in this project (app.js):
+    pino-http (logging)
+    → cors
+    → express.json()
+    → express.urlencoded()
+    → express-rate-limit
+    → routes (mounted at /api)
+       → authenticate middleware
+       → authorise middleware
+       → validate middleware
+       → controller function
+    → global error handler (last)
+
+  Key rule: order matters.
+    - cors must be before routes (preflight OPTIONS requests need it)
+    - express.json() must be before any middleware reading req.body
+    - Error handler must be last (4-argument signature catches next(err))
+
+------------------------------------------------------------------------
+Q7. How does the global error handler work in this project?
+------------------------------------------------------------------------
+
+ANSWER:
+  Express recognizes an error handler by its 4-argument signature:
+    (err, req, res, next)
+
+  In error.middleware.js, it handles:
+
+    Mongoose ValidationError  → 400 with field-level messages
+    Mongoose CastError        → 400 "Invalid ID format"
+    Duplicate key (11000)     → 409 with field name
+    JsonWebTokenError         → 401 "Invalid token"
+    TokenExpiredError         → 401 "Token expired"
+    Stripe errors             → 402 with Stripe message
+    Operational err.statusCode→ that status code
+    Default                   → 500 (message hidden in production)
+
+  Example:
+    When a service throws:
+      const err = new Error('Order not found');
+      err.statusCode = 404;
+      throw err;
+
+    The controller catches it with next(err).
+    The error middleware reads err.statusCode and calls:
+      apiError(res, err.message, err.statusCode)
+
+------------------------------------------------------------------------
+Q8. Explain the validate middleware in this project. Why is the target
+    parameter important?
+------------------------------------------------------------------------
+
+ANSWER:
+  validate.middleware.js is a factory function:
+    export function validate(schema, target = 'body') {
+      return (req, res, next) => {
+        const { error, value } = schema.validate(req[target], {
+          abortEarly: false,
+          stripUnknown: true
+        });
+        if (error) return apiError(res, 'Validation failed', 400,
+          error.details.map(d => d.message));
+        req[target] = value;
+        next();
+      };
+    }
+
+  target parameter:
+    - 'body'   → POST/PUT request bodies
+    - 'query'  → GET query strings (?page=1&pageSize=10)
+    - 'params' → URL parameters (:id, :productId)
+
+  Why it matters:
+    GET /api/products?page=1 → req.body is empty.
+    Validating req.body here would silently fail (no data to validate).
+    You must use validate(paginationSchema, 'query').
+
+  Project example:
+    router.get('/users', validate(paginationSchema, 'query'), getUsers);
+    router.post('/items', validate(addToCartSchema), addItem); // default body
+
+------------------------------------------------------------------------
+Q9. How does role-based access control work in this API?
+------------------------------------------------------------------------
+
+ANSWER:
+  Two middleware functions in auth.middleware.js:
+
+  1. authenticate — verifies the JWT and attaches req.user:
+       const payload = jwt.verify(token, env.jwtSecret);
+       req.user = { id: payload.id, email: payload.email, role: payload.role };
+
+  2. authorise(...roles) — checks req.user.role:
+       if (!roles.includes(req.user.role))
+         return apiError(res, 'Forbidden', 403);
+
+  Usage in routes:
+    // Admin only
+    router.get('/dashboard', authenticate, authorise('admin'), getDashboard);
+
+    // Admin or Seller
+    router.post('/', authenticate, authorise('admin','seller'), createProduct);
+
+    // Customer only
+    router.post('/', authenticate, authorise('customer'), createReview);
+
+  Three roles in the system: admin, seller, customer.
+
+------------------------------------------------------------------------
+Q10. What is the difference between authentication and authorization?
+------------------------------------------------------------------------
+
+ANSWER:
+  Authentication: Who are you?
+    - Verifying identity via credentials (email + password)
+    - If valid → issues a JWT access token
+    - Handled in: POST /api/auth/login
+
+  Authorization: What are you allowed to do?
+    - Verifying the authenticated user has permission for the action
+    - Checked via the user's role in the JWT
+    - Handled in: authorise('admin') middleware
+
+  Example in this project:
+    A seller can CREATE a product but cannot GET /admin/dashboard.
+    A customer can submit a review but cannot approve one.
+
+    POST /api/products      → authenticate + authorise('admin','seller')
+    PUT  /:id/approve       → authenticate + authorise('admin')
+
+================================================================================
+  PART 3 — AUTHENTICATION & JWT
+================================================================================
+
+------------------------------------------------------------------------
+Q11. Explain your JWT implementation: access token vs refresh token.
+------------------------------------------------------------------------
+
+ANSWER:
+  ACCESS TOKEN:
+    - Short-lived (60 minutes, from env.jwtExpiresIn)
+    - Signed with JWT_SECRET
+    - Payload: { id, email, role }
+    - Sent in Authorization: Bearer <token> header on every request
+    - Stateless — server does NOT store it
+
+  REFRESH TOKEN:
+    - Long-lived (7 days, from env.jwtRefreshExpiresIn)
+    - Signed with JWT_REFRESH_SECRET (different secret)
+    - Stored in the User document in MongoDB (select: false)
+    - Used ONLY at POST /api/auth/refresh-token to get a new access token
+
+  Flow:
+    1. Login → server issues both tokens
+    2. Client uses access token for API calls
+    3. Access token expires → client sends refresh token
+    4. Server validates refresh token against DB → issues new access token
+    5. Logout → server clears refreshToken from DB
+
+  Security split:
+    Using two different secrets means a compromised JWT_SECRET
+    cannot be used to forge refresh tokens and vice versa.
+
+------------------------------------------------------------------------
+Q12. Why is the refresh token stored in the database? What does this enable?
+------------------------------------------------------------------------
+
+ANSWER:
+  The refresh token is stored in the User document (refreshToken field,
+  select: false).
+
+  This enables two things:
+
+  1. LOGOUT / REVOCATION:
+     On logout, the server sets refreshToken = null.
+     Even if someone has the refresh token, the next call to
+     /refresh-token will fail because DB value doesn't match.
+
+  2. SINGLE ACTIVE SESSION (current implementation):
+     Each login overwrites the stored refresh token.
+     The previous session's refresh token is invalidated.
+
+  In auth.service.js refreshToken():
+    const user = await User.findById(payload.id).select('+refreshToken');
+    if (!user || user.refreshToken !== token) {
+      throw 401 error;
+    }
+
+  Security gap:
+    The current implementation does NOT rotate the refresh token on use.
+    This means if a refresh token is stolen, the attacker can keep using it.
+    Fix: generate a new refresh token on every /refresh-token call and
+    invalidate the old one (refresh token rotation).
+
+------------------------------------------------------------------------
+Q13. What is bcrypt and why does this project use 12 salt rounds?
+------------------------------------------------------------------------
+
+ANSWER:
+  bcrypt is a password hashing function designed to be slow (intentionally).
+
+  It works by:
+    1. Generating a random salt (prevents rainbow table attacks)
+    2. Hashing password + salt through N rounds of computation
+    3. Embedding the salt into the output hash
+
+  Salt rounds = 2^N iterations:
+    10 rounds ≈  10ms   (fast, weaker)
+    12 rounds ≈  40ms   (this project — good balance)
+    14 rounds ≈ 160ms   (very secure, slows login)
+
+  Why 12 rounds:
+    Makes brute-force attacks expensive.
+    If attacker gets the DB, they cannot crack passwords quickly.
+    40ms per hash is acceptable for login (not a hot path).
+
+  In this project (user.model.js pre-save hook):
+    userSchema.pre('save', async function (next) {
+      if (!this.isModified('passwordHash')) return next();
+      this.passwordHash = await bcrypt.hash(this.passwordHash, 12);
+      next();
+    });
+
+  The isModified check prevents re-hashing on every save
+  (e.g., updating email would not re-hash the password).
+
+------------------------------------------------------------------------
+Q14. How does the authenticate middleware handle token expiry?
+------------------------------------------------------------------------
+
+ANSWER:
+  jwt.verify() throws specific errors based on token state:
+
+    JsonWebTokenError  → token malformed or wrong signature
+    TokenExpiredError  → token valid but expired
+
+  In auth.middleware.js:
+    try {
+      const payload = jwt.verify(token, env.jwtSecret);
+      req.user = { id: payload.id, email: payload.email, role: payload.role };
+      next();
+    } catch {
+      return apiError(res, 'Unauthorised', 401);
+    }
+
+  Currently both errors return 401. In the error middleware, they are
+  differentiated for better client messages:
+    TokenExpiredError   → 401 "Token expired"
+    JsonWebTokenError   → 401 "Invalid token"
+
+  Client flow:
+    When the client receives 401 with "Token expired", it should
+    automatically call POST /api/auth/refresh-token with the refresh token
+    to get a new access token and retry the original request.
+
+------------------------------------------------------------------------
+Q15. What is the security risk of storing the role in the JWT payload?
+------------------------------------------------------------------------
+
+ANSWER:
+  The role is stored in the JWT payload and never re-fetched from DB:
+    req.user = { id: payload.id, email: payload.email, role: payload.role }
+
+  Risk scenario:
+    1. User has role: 'seller', logs in, gets a JWT valid for 60 minutes
+    2. Admin demotes user to 'customer' in the DB
+    3. User's existing JWT still says role: 'seller'
+    4. For the next 60 minutes, the user can still access seller routes
+
+  This is the fundamental trade-off of stateless JWTs:
+    Performance benefit: no DB lookup on every request
+    Security cost: role changes take up to 60 minutes to propagate
+
+  Mitigation options:
+    1. Short access token TTL (already 60m — could reduce to 5-15m)
+    2. Token revocation list (Redis blocklist) — checked on every request
+    3. Re-fetch role from DB on sensitive operations only (hybrid)
+    4. Use opaque tokens with a session store instead of JWTs
+
+================================================================================
+  PART 4 — MONGODB & MONGOOSE
+================================================================================
+
+------------------------------------------------------------------------
+Q16. How do you prevent race conditions in stock reservation?
+------------------------------------------------------------------------
+
+ANSWER:
+  A naive approach (find → check → update) has a race condition:
+    Thread A: finds stock = 5, checks 5 >= 3 ✓
+    Thread B: finds stock = 5, checks 5 >= 3 ✓
+    Thread A: decrements → stock = 2
+    Thread B: decrements → stock = -1 ← oversold!
+
+  This project uses an atomic findOneAndUpdate:
+    const result = await Product.findOneAndUpdate(
+      { _id: productId, stockQty: { $gte: quantity } },
+      { $inc: { stockQty: -quantity } }
+    );
+
+  MongoDB executes this as a single atomic operation at the document level.
+  The filter { stockQty: { $gte: quantity } } is evaluated and the update
+  applied atomically. If stock is insufficient, no document matches,
+  result is null, and we return false.
+
+  Thread A and Thread B cannot both succeed if only 3 units remain.
+  Only one will get the document; the other gets null.
+
+------------------------------------------------------------------------
+Q17. What is the purpose of select: false on passwordHash and refreshToken?
+------------------------------------------------------------------------
+
+ANSWER:
+  select: false tells Mongoose to exclude the field from query results
+  by default. This prevents sensitive data from being accidentally
+  returned in any findOne(), find(), or populate() query.
+
+  Without select: false:
+    User.findById(id)
+    // returns: { _id, email, role, passwordHash, refreshToken, ... }
+    // passwordHash exposed if returned to client!
+
+  With select: false:
+    User.findById(id)
+    // returns: { _id, email, role, ... }
+    // passwordHash and refreshToken NOT included
+
+  When you explicitly need them:
+    User.findOne({ email }).select('+passwordHash +refreshToken')
+    // Only in login() and refreshToken()
+
+  In this project, if login() forgot the +passwordHash:
+    user.comparePassword(password) would compare against undefined
+    and always return false → no one could log in.
+
+------------------------------------------------------------------------
+Q18. Explain the difference between find() with populate() vs storing
+     a snapshot. Why does this project snapshot order items?
+------------------------------------------------------------------------
+
+ANSWER:
+  POPULATE approach:
+    Order stores only productId. On read, populate() fetches current
+    product data from the Product collection.
+
+  SNAPSHOT approach (used in this project):
+    Order.items stores: { productId, name, quantity, unitPrice, totalPrice }
+    The name and price are copied at order creation time.
+
+  Why snapshot is correct for orders:
+
+  Scenario:
+    1. Customer orders Product A at $50.
+    2. Seller later changes Product A price to $80.
+    3. Customer views their order history.
+
+  With populate():
+    Order shows $80 — WRONG. Customer paid $50.
+
+  With snapshot:
+    Order shows $50 — CORRECT. Immutable historical record.
+
+  This is an event sourcing principle: once an order is created,
+  its item data is a fact about the past and must not change.
+
+  Populate is fine for reading current catalog data (product listing).
+  Snapshot is mandatory for financial/transactional records.
+
+------------------------------------------------------------------------
+Q19. What is the compound unique index on the Review model and why
+     is it important?
+------------------------------------------------------------------------
+
+ANSWER:
+  In review.model.js:
+    reviewSchema.index({ productId: 1, userId: 1 }, { unique: true });
+
+  This creates a B-tree index on the combination of productId and userId
+  and enforces uniqueness at the database level.
+
+  Enforcement:
+    If a user tries to submit a second review for the same product,
+    MongoDB throws a duplicate key error (code 11000).
+    The error middleware catches this and returns 409 Conflict.
+
+  Why at DB level, not just service level:
+    A service-level check (findOne → if exists throw) has a race condition.
+    Two simultaneous requests can both pass the check before either creates
+    the review. The DB constraint is the only reliable guarantee.
+
+  Index also improves query performance:
+    Review.find({ productId, isApproved: true }) uses this index
+    for fast retrieval by product.
+
+------------------------------------------------------------------------
+Q20. How does Mongoose schema validation differ from Joi validation?
+     Why use both?
+------------------------------------------------------------------------
+
+ANSWER:
+  MONGOOSE SCHEMA VALIDATION:
+    - Enforced at the database layer
+    - Runs on .save() and .create()
+    - Validates: required, enum, min, max, type
+    - Returns ValidationError if violated
+    Example: Product.price has min: 0 in schema
+
+  JOI VALIDATION:
+    - Enforced at the API boundary (before hitting the DB)
+    - Runs in validate.middleware.js before the controller
+    - More expressive: regex patterns, cross-field rules, custom messages
+    - Returns 400 immediately without touching the DB
+
+  Why both:
+    Joi: fast-fail at the HTTP layer, user-friendly error messages
+    Mongoose: last line of defense for data integrity
+    They serve different layers of the system.
+
+  Example from this project:
+    Joi createProductSchema validates price is a number >= 0.
+    If somehow invalid data bypasses Joi (direct DB script),
+    Mongoose still rejects it.
+
+------------------------------------------------------------------------
+Q21. How does recalculateRating work and what is its performance concern?
+------------------------------------------------------------------------
+
+ANSWER:
+  In product.service.js:
+    export async function recalculateRating(productId) {
+      const result = await Review.aggregate([
+        { $match: { productId: ObjectId(productId), isApproved: true } },
+        { $group: {
+            _id: null,
+            avg: { $avg: '$rating' },
+            count: { $sum: 1 }
+        }}
+      ]);
+      const avg = result[0]?.avg ?? 0;
+      const count = result[0]?.count ?? 0;
+      await Product.findByIdAndUpdate(productId, {
+        averageRating: parseFloat(avg.toFixed(2)),
+        reviewCount: count
+      });
+    }
+
+  Called after: createReview, approveReview, deleteReview.
+
+  Performance concern:
+    Each review operation triggers a full collection scan of all reviews
+    for that product, plus a product update.
+    At high volume (10k reviews/min), this creates write amplification:
+    every review write → aggregate read + product write.
+
+  Better approach at scale:
+    Use MongoDB change streams to listen for Review changes and
+    update ratings asynchronously in a background worker.
+    Or maintain a running sum/count and update incrementally:
+      { $inc: { reviewSum: rating, reviewCount: 1 } }
+      averageRating = reviewSum / reviewCount
+
+================================================================================
+  PART 5 — REST API DESIGN
+================================================================================
+
+------------------------------------------------------------------------
+Q22. What REST principles does this API follow?
+------------------------------------------------------------------------
+
+ANSWER:
+  1. RESOURCE-BASED URLS:
+     /api/products        (collection)
+     /api/products/:id    (single resource)
+     /api/cart/items      (sub-resource)
+
+  2. HTTP METHODS:
+     GET    → read (no side effects)
+     POST   → create
+     PUT    → update (full or partial in this API)
+     DELETE → remove
+
+  3. STATELESSNESS:
+     Every request contains all needed information (JWT in header).
+     Server stores no session state between requests.
+
+  4. CONSISTENT RESPONSE ENVELOPE:
+     Every response: { success, message, data, errors, timestamp }
+     Same shape for success and failure.
+
+  5. APPROPRIATE STATUS CODES:
+     200 OK, 201 Created, 400 Bad Request, 401 Unauthorized,
+     403 Forbidden, 404 Not Found, 409 Conflict, 500 Server Error
+
+  Design decision — 200 vs 204 for DELETE:
+    This API returns 200 with null data on DELETE.
+    REST purists use 204 No Content.
+    200 is chosen because the response envelope confirms the action
+    with a human-readable message, which the frontend finds useful.
+
+------------------------------------------------------------------------
+Q23. Why is GET /api/admin/:id declared BEFORE GET /api/:id in
+     order.routes.js? What happens if the order is reversed?
+------------------------------------------------------------------------
+
+ANSWER:
+  Express matches routes in declaration order — first match wins.
+
+  If /:id was declared first:
+    A request to GET /orders/admin/someId
+    would match /:id with id = "admin"
+    Express tries to cast "admin" as a MongoDB ObjectId
+    → Mongoose CastError: Cast to ObjectId failed for value "admin"
+    → Error middleware returns 400 "Invalid ID format"
+    → The admin route never runs.
+
+  Correct order in order.routes.js:
+    router.get('/admin/:id', authenticate, authorise('admin'), getOrderAdmin);
+    router.get('/:id', authenticate, getOrder);  // after
+
+  Same pattern in notification.routes.js:
+    router.put('/mark-all-read', markAllAsRead);
+    router.put('/:id/read', markAsRead);  // after
+    If reversed: PUT /mark-all-read matches /:id with id="mark-all-read"
+
+  Rule: Always declare specific/static routes before parameterized routes.
+
+------------------------------------------------------------------------
+Q24. How does pagination work in this API? What are the two approaches?
+------------------------------------------------------------------------
+
+ANSWER:
+  This API uses OFFSET-BASED pagination (skip/limit):
+
+  From paginationSchema:
+    page (default 1), pageSize (default 10, max 100)
+
+  Calculation:
+    const skip = (page - 1) * pageSize;
+    Model.find().skip(skip).limit(pageSize)
+
+  Example: page=3, pageSize=10 → skip 20 records, return next 10.
+
+  Response includes: { items, totalCount, page, pageSize, totalPages }
+
+  Limitation of skip/limit:
+    At large offsets (page 1000 of 10000 items), MongoDB must scan
+    10,000 documents to skip 9,990. Gets slower as offset grows.
+
+  CURSOR-BASED pagination (better at scale):
+    Instead of skip, use the last document's _id as a cursor:
+      Model.find({ _id: { $gt: lastId } }).limit(pageSize)
+    O(log n) using the ObjectId index. No offset penalty.
+
+  This API would benefit from cursor-based pagination for
+  order history and product listing at scale.
+
+------------------------------------------------------------------------
+Q25. How does the product search API handle multiple filters?
+------------------------------------------------------------------------
+
+ANSWER:
+  In product.service.js searchProducts():
+
+  Builds a Mongoose filter object dynamically:
+
+    const filter = { isActive: true };
+
+    if (query.search)
+      filter.$or = [
+        { name: { $regex: query.search, $options: 'i' } },
+        { description: { $regex: query.search, $options: 'i' } }
+      ];
+
+    if (query.categoryId) filter.categoryId = query.categoryId;
+    if (query.minPrice || query.maxPrice)
+      filter.price = {
+        ...(query.minPrice && { $gte: query.minPrice }),
+        ...(query.maxPrice && { $lte: query.maxPrice })
+      };
+    if (query.minRating) filter.averageRating = { $gte: query.minRating };
+    if (query.tags) filter.tags = { $in: query.tags };
+
+  Sort:
+    const sortObj = { [query.sortBy]: query.sortOrder === 'desc' ? -1 : 1 };
+
+  The result is cached using the full query object as cache key.
+
+================================================================================
+  PART 6 — CACHING
+================================================================================
+
+------------------------------------------------------------------------
+Q26. How is caching implemented in this project? What is the cache strategy?
+------------------------------------------------------------------------
+
+ANSWER:
+  Cache library: node-cache (in-process, TTL-based)
+  Singleton: one shared instance across all service modules.
+
+  Cached resources:
+    Single product:  key = 'product:' + id
+    Product lists:   key = 'products:' + JSON.stringify(query)
+    Featured:        key = 'products:featured'
+    Categories:      key = 'categories:all'
+
+  Read-through cache pattern in getProductById():
+    const cached = getCache('product:' + id);
+    if (cached) return cached;
+    const product = await Product.findById(id).populate('categoryId', 'name');
+    setCache('product:' + id, product, env.cacheTtl);  // 300s default
+    return product;
+
+  Cache invalidation on writes:
+    createProduct / updateProduct / deleteProduct:
+      deleteCache('product:' + id);
+      _invalidateListCache();  // deletes all 'products:*' keys
+
+  Stock change (inventory.service.js):
+    deleteCache('product:' + productId);
+
+------------------------------------------------------------------------
+Q27. What is a cache stampede and does this project have one?
+------------------------------------------------------------------------
+
+ANSWER:
+  Cache stampede: when a cached key expires and many requests hit the DB
+  simultaneously before any of them can repopulate the cache.
+
+  Scenario in this API:
+    'products:featured' TTL expires.
+    50 concurrent requests arrive at the same time.
+    All find no cache → all query MongoDB → all write the same value.
+    50 DB reads instead of 1.
+
+  Current code has this vulnerability:
+    const cached = getCache(key);
+    if (cached) return cached;
+    // All 50 threads are here simultaneously
+    const data = await Product.find(...);  // 50 parallel queries
+    setCache(key, data);
+
+  Mitigations:
+    1. Locking: set a flag ('products:featured:loading') so only one
+       request queries DB, others wait.
+    2. Stale-while-revalidate: serve stale data while one background
+       process refreshes the cache.
+    3. Probabilistic early expiration: randomly refresh cache before
+       expiry to avoid synchronous expiry of all items at once.
+
+  For this API's scale, the risk is low. At high traffic, a Redis
+  lock (SET NX PX) or a background refresh job would fix it.
+
+------------------------------------------------------------------------
+Q28. What is the limitation of node-cache in a clustered environment?
+------------------------------------------------------------------------
+
+ANSWER:
+  node-cache is in-process (stored in Node.js heap memory).
+  Each process has its own isolated cache.
+
+  Problem with clustering:
+    PM2 or Node cluster spins 4 worker processes.
+    Process 1 caches 'product:abc123' with stockQty = 10.
+    Process 2 handles a checkout → stock drops to 7 → invalidates cache.
+    Process 1's cache still shows stockQty = 10 → stale data served.
+
+  Example impact:
+    Product page shows "In Stock" (from Process 1 cache)
+    But actual stock = 0 (Process 2 decremented it)
+
+  Solution: Replace node-cache with Redis (shared external cache):
+    Redis is a separate process → all Node workers share one cache.
+    Invalidation on Process 2 is immediately visible to Process 1.
+
+  This is why the README notes:
+    "At scale → Redis replaces node-cache"
+
+================================================================================
+  PART 7 — SECURITY
+================================================================================
+
+------------------------------------------------------------------------
+Q29. What security measures are implemented in this API?
+------------------------------------------------------------------------
+
+ANSWER:
+  1. PASSWORD HASHING
+     bcryptjs with 12 salt rounds on all stored passwords.
+
+  2. JWT AUTHENTICATION
+     Stateless Bearer token authentication.
+     Access token (60m) + Refresh token (7d, stored in DB).
+
+  3. ROLE-BASED ACCESS CONTROL
+     authorise('admin'), authorise('seller'), authorise('customer')
+     Prevents privilege escalation.
+
+  4. RATE LIMITING
+     express-rate-limit: 100 requests/minute per IP.
+     Returns 429 Too Many Requests.
+
+  5. INPUT VALIDATION
+     Joi validates all request inputs (body, query, params)
+     before they reach the service or DB.
+     Prevents malformed data and some injection attempts.
+
+  6. MONGOOSE QUERY SANITIZATION
+     Mongoose parameterized queries prevent NoSQL injection.
+     { email: req.body.email } is safe — Mongoose treats it as
+     a string, not a query operator.
+
+  7. select: false ON SENSITIVE FIELDS
+     passwordHash and refreshToken never accidentally leak.
+
+  8. ENVIRONMENT VARIABLES
+     Secrets never hardcoded. Loaded via dotenv from .env.
+
+  9. CORS
+     Configured with env.corsOrigin to whitelist specific frontend.
+
+------------------------------------------------------------------------
+Q30. What is NoSQL injection and how does Mongoose prevent it?
+------------------------------------------------------------------------
+
+ANSWER:
+  NoSQL injection: attacker sends MongoDB operators in request body
+  to manipulate queries.
+
+  Example attack (without protection):
+    POST /api/auth/login
+    Body: { "email": { "$gt": "" }, "password": "anything" }
+
+  Naive code:
+    User.findOne({ email: req.body.email })
+    // becomes: User.findOne({ email: { $gt: "" } })
+    // matches ALL users — attacker logs in as first user!
+
+  Mongoose protection:
+    When the schema defines email as String type, Mongoose casts
+    the value to a string. An object like { $gt: "" } becomes
+    "[object Object]" — which matches nothing. Injection fails.
+
+  Additional protection in this project:
+    Joi validation checks email is a valid email string before it
+    reaches the service layer. { $gt: "" } fails Joi email validation.
+
+  Belt and suspenders: Joi + Mongoose schema types together.
+
+------------------------------------------------------------------------
+Q31. How would you protect the login endpoint from brute-force attacks?
+------------------------------------------------------------------------
+
+ANSWER:
+  Current protection:
+    Global rate limit: 100 req/min per IP (express-rate-limit).
+    This is insufficient for login — 100 password attempts per minute
+    per IP is still a significant brute-force vector.
+
+  Better approach — per-route rate limit on /api/auth/login:
+    const loginLimiter = rateLimit({
+      windowMs: 15 * 60 * 1000,  // 15 minutes
+      max: 5,                      // 5 attempts
+      message: 'Too many login attempts, try again in 15 minutes'
+    });
+    router.post('/login', loginLimiter, validate(loginSchema), login);
+
+  Additional hardening:
+    1. Account lockout: after 5 failures, set isActive = false temporarily
+       or add a lockedUntil: Date field.
+    2. CAPTCHA after 3 failures (e.g., Google reCAPTCHA v3).
+    3. Notify user of login from new IP/device.
+    4. Track failed attempts in Redis with TTL.
+
+  Credential stuffing (different IPs):
+    The IP-based limit doesn't help if attacker uses a botnet.
+    Account-level lockout + monitoring are required.
+
+================================================================================
+  PART 8 — ORDER FLOW & PAYMENTS
+================================================================================
+
+------------------------------------------------------------------------
+Q32. Walk through the complete order creation flow in this API.
+------------------------------------------------------------------------
+
+ANSWER:
+  POST /api/orders/checkout
+
+  1. AUTHENTICATE
+     JWT verified → req.user = { id, email, role }
+
+  2. VALIDATE
+     Joi checkoutSchema: shippingAddress, billingAddress, paymentMethod required
+
+  3. CART CHECK
+     Cart.findOne({ userId }).populate('items.productId')
+     If empty → throw 400 "Cart is empty"
+
+  4. STOCK RESERVATION (atomic, with rollback)
+     For each cart item:
+       inventoryService.reserveStock(productId, quantity)
+       Uses findOneAndUpdate with stockQty: { $gte: quantity }
+       If fails → release all previously reserved items → throw 400
+
+  5. PRICE CALCULATION
+     subTotal = sum of (salePrice ?? price) * quantity per item
+     taxAmount = subTotal * 0.18 (18%)
+     shippingCost = subTotal > 500 ? 0 : 50
+     If promotionCode: apply discount (caught and ignored if invalid)
+     totalAmount = subTotal + taxAmount + shippingCost - discountAmount
+
+  6. ORDER CREATION
+     Order.create({ userId, orderNumber: 'ORD-timestamp-random',
+       status: 'pending', paymentStatus: 'pending', items: snapshot, ... })
+
+  7. CART CLEAR
+     Cart.findOneAndUpdate({ userId }, { $set: { items: [] } })
+
+  8. NOTIFICATION (non-blocking)
+     notificationService.sendOrderConfirmation().catch(() => {})
+
+  9. STRIPE PAYMENT INTENT (graceful degradation)
+     paymentService.createPaymentIntent(order._id)
+     If Stripe fails → log warning, return order without clientSecret
+
+  10. RESPONSE
+      { order, clientSecret }
+
+------------------------------------------------------------------------
+Q33. What happens if the server crashes mid-checkout? How would you fix it?
+------------------------------------------------------------------------
+
+ANSWER:
+  Current vulnerability — crash after step 4 but before step 5:
+    Stock is reserved (decremented in DB) but order is never created.
+    Stock is lost — items appear out of stock but no order exists.
+
+  Crash after step 6 but before step 7:
+    Order exists, cart is NOT cleared.
+    User can check out again → double order.
+
+  Fix: Outbox Pattern / Saga Pattern
+
+  SAGA approach for checkout:
+    1. Create order with status: 'draft'
+    2. Reserve stock
+    3. Clear cart
+    4. Mark order status: 'pending'
+    5. Create Stripe intent
+
+    Each step is checkpointed. On resume/retry, check order.status
+    to determine where to continue.
+
+  OUTBOX approach:
+    Write order + an OutboxEvent { type: 'ORDER_CREATED', orderId }
+    in a single MongoDB transaction (requires replica set).
+    A background worker reads the outbox and triggers remaining steps.
+
+  Practical minimum fix for this project:
+    Wrap Order.create + Cart.clear in a MongoDB session transaction:
+      const session = await mongoose.startSession();
+      session.startTransaction();
+      try {
+        await Order.create([...], { session });
+        await Cart.updateOne({ userId }, { $set: { items: [] } }, { session });
+        await session.commitTransaction();
+      } catch {
+        await session.abortTransaction();
+      }
+
+------------------------------------------------------------------------
+Q34. How does Stripe payment integration work in this API?
+------------------------------------------------------------------------
+
+ANSWER:
+  Two-step flow:
+
+  STEP 1 — CREATE PAYMENT INTENT (at checkout):
+    paymentService.createPaymentIntent(orderId):
+      1. Load order from DB
+      2. Call Stripe API:
+           stripe.paymentIntents.create({
+             amount: order.totalAmount * 100,  // cents
+             currency: 'usd',
+             metadata: { orderId, orderNumber }
+           })
+      3. Save paymentIntentId to order document
+      4. Return clientSecret to frontend
+
+    Frontend uses clientSecret to render Stripe's payment form.
+
+  STEP 2 — PROCESS PAYMENT (after user enters card):
+    POST /api/orders/:id/payment { paymentIntentId }
+    paymentService.processPayment(orderId, paymentIntentId):
+      1. Load order, verify stored paymentIntentId === incoming
+         (prevents one order's intent being used for another)
+      2. Retrieve from Stripe: stripe.paymentIntents.retrieve(id)
+      3. Check status === 'succeeded'
+      4. Update order: paymentStatus='completed', status='confirmed'
+
+  Graceful degradation:
+    If Stripe is unreachable (dev environment, no real key), the
+    try/catch in createPaymentIntent logs a warning and returns
+    { order, clientSecret: null }. Order still created.
+
+================================================================================
+  PART 9 — TESTING
+================================================================================
+
+------------------------------------------------------------------------
+Q35. What is the difference between unit tests and integration tests?
+     Which does this project use?
+------------------------------------------------------------------------
+
+ANSWER:
+  UNIT TESTS:
+    - Test a single function/module in isolation
+    - All dependencies (DB, Stripe, other services) are mocked
+    - Fast (milliseconds), run in CI on every commit
+    - Example: test that calculateTotal() returns correct sum
+
+  INTEGRATION TESTS (used in this project):
+    - Test multiple layers together (controller + service + DB)
+    - Use a real MongoDB test database
+    - Use Supertest to make HTTP requests to the actual Express app
+    - Slower (seconds), but test real behavior
+
+  Example from this project:
+    describe('POST /api/orders/checkout', () => {
+      it('creates order and returns clientSecret', async () => {
+        // add items to cart first
+        // then checkout
+        const res = await request(app)
+          .post('/api/orders/checkout')
+          .set('Authorization', `Bearer ${customerToken}`)
+          .send({ shippingAddress: '...', paymentMethod: 'card' });
+        expect(res.status).toBe(201);
+        expect(res.body.data.order.status).toBe('pending');
+      });
+    });
+
+  Why integration tests are more valuable here:
+    The order flow touches 5 services and 4 DB collections.
+    A unit test with mocks cannot detect a bug where Cart.findOneAndUpdate
+    clears the wrong user's cart.
+
+------------------------------------------------------------------------
+Q36. How do you ensure test isolation in this project?
+------------------------------------------------------------------------
+
+ANSWER:
+  Problem: integration tests share a real database. One test's data
+  can corrupt another test's expectations.
+
+  Isolation strategies:
+
+  1. afterEach cleanup:
+     afterEach(async () => {
+       await Order.deleteMany({});
+       await Cart.deleteMany({});
+     });
+
+  2. beforeAll setup:
+     Create fresh test users, get tokens.
+     Each test file starts from a clean known state.
+
+  3. Separate test database:
+     MONGODB_URI_TEST=mongodb://localhost:27017/ecommerce-test
+     Never runs against production data.
+
+  4. Seed minimal data:
+     Only create what the test needs, not the full seed.
+
+  Lesson from Phase 6 false positive:
+    The empty-cart test passed because the cart had leftover items
+    from Phase 5 tests. The fix: explicitly DELETE /api/cart before
+    testing empty-cart behavior. Don't assume state — always set it.
+
+------------------------------------------------------------------------
+Q37. What is the purpose of Supertest? How is it used here?
+------------------------------------------------------------------------
+
+ANSWER:
+  Supertest wraps the Express app and lets you make HTTP requests
+  without starting a real server (no port binding required).
+
+  Setup:
+    import request from 'supertest';
+    import app from '../src/app.js';
+
+  Usage:
+    const res = await request(app)
+      .get('/api/products')
+      .query({ page: 1, pageSize: 5 });
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.items).toHaveLength(5);
+
+  Authenticated requests:
+    const res = await request(app)
+      .post('/api/cart/items')
+      .set('Authorization', `Bearer ${customerToken}`)
+      .send({ productId: '...', quantity: 2 });
+
+  Benefits:
+    - Tests the full middleware pipeline (auth, validation, error handling)
+    - No need to mock Express internals
+    - Tests are realistic — if it passes in tests, it works in production
+
+================================================================================
+  PART 10 — PROJECT-SPECIFIC DEEP DIVES
+================================================================================
+
+------------------------------------------------------------------------
+Q38. Why does this project use ESM (import/export) instead of CommonJS
+     (require)?
+------------------------------------------------------------------------
+
+ANSWER:
+  ESM is the modern JavaScript module standard (ECMAScript Modules).
+  Enabled by "type": "module" in package.json.
+
+  Benefits used in this project:
+    - Native static imports: import { Router } from 'express'
+    - Top-level await in app.js (not possible in CommonJS)
+    - Cleaner named exports: export async function createOrder()
+    - Tree-shaking friendly (build tools can eliminate unused code)
+
+  Implications:
+    - All file extensions must be explicit: import './auth.routes.js'
+      (not just './auth.routes')
+    - __dirname and __filename are not available (use import.meta.url)
+    - Jest requires --experimental-vm-modules flag (Jest is CommonJS
+      by default and needs the experimental flag for ESM support)
+    - Dynamic imports use import() (async), not require()
+
+  No require() anywhere in this project — consistent ESM throughout.
+
+------------------------------------------------------------------------
+Q39. How does the promotion/discount system work?
+------------------------------------------------------------------------
+
+ANSWER:
+  Promotion document structure:
+    code (uppercase, unique), type (percentage/fixed_amount/free_shipping),
+    value, minOrderAmount, usageLimit, usageCount, startDate, endDate, isActive
+
+  At checkout, if dto.promotionCode provided:
+    promotionService.applyPromotion(code, subTotal):
+
+    1. Find: code match (uppercase), isActive=true, startDate<=now<=endDate
+    2. Check: subTotal >= minOrderAmount
+    3. Check: usageCount < usageLimit (if usageLimit set)
+    4. Calculate discount:
+         percentage:   discount = subTotal * (value / 100)
+         fixed_amount: discount = value
+         free_shipping: discount = 0, freeShipping = true
+    5. Atomic increment: $inc: { usageCount: 1 }
+    6. Return { discount, freeShipping }
+
+  If promo is invalid/expired, the error is CAUGHT AND IGNORED:
+    try {
+      const promo = await promotionService.applyPromotion(code, subTotal);
+      discountAmount = promo.discount;
+    } catch (promoErr) {
+      logger.warn(promoErr, 'Promo code invalid — skipping');
+    }
+    // order proceeds with discountAmount = 0
+
+  This is intentional: a bad promo code should not block checkout.
+
+------------------------------------------------------------------------
+Q40. How is inventory managed across the order lifecycle?
+------------------------------------------------------------------------
+
+ANSWER:
+  STOCK RESERVATION (on checkout):
+    inventoryService.reserveStock(productId, quantity)
+    Atomically decrements stockQty in DB.
+    Also invalidates 'product:{id}' cache.
+
+  STOCK RELEASE (on cancellation):
+    cancelOrder → inventoryService.releaseStock(productId, quantity)
+    Atomically increments stockQty back.
+    Also invalidates 'product:{id}' cache.
+
+  NO RELEASE on delivery:
+    Stock was already consumed at reservation. Delivering an order
+    does not change stock further.
+
+  Cache invalidation on stock change:
+    Both reserveStock and releaseStock call:
+      deleteCache('product:' + productId)
+    So the next GET /api/products/:id fetches fresh stock from DB.
+
+  getLowStockProducts(threshold=10):
+    Used by admin dashboard.
+    Returns products where stockQty <= 10 and isActive = true.
+
+------------------------------------------------------------------------
+Q41. How does the notification system work end-to-end?
+------------------------------------------------------------------------
+
+ANSWER:
+  NOTIFICATION CREATION:
+    Internal function createNotification(userId, { title, message, type }):
+      Notification.create({ userId, title, message, type, isRead: false })
+
+  TRIGGER POINTS:
+    1. Order checkout → sendOrderConfirmation(userId, orderId, orderNumber)
+       Title: "Order Confirmed"
+       Message: "Your order #ORD-xxx is confirmed and being processed."
+       Type: "order"
+
+    2. Order status change → sendOrderUpdate(userId, orderId, orderNumber, status)
+       Title: "Order Update"
+       Type: "order"
+
+    3. Low stock → sendLowStockAlert(adminIds, productName, stockQty)
+       Type: "system"
+
+  NON-BLOCKING PATTERN:
+    In order.service.js:
+      notificationService.sendOrderConfirmation(userId, id, number).catch(() => {});
+    The notification creation is fire-and-forget.
+    If it fails, the order is NOT affected. Error is silently swallowed.
+    (Improvement: log the error even if not thrown)
+
+  USER RETRIEVAL:
+    GET /api/notifications → latest 50, sorted by createdAt desc, for req.user.id
+
+  MARK AS READ:
+    PUT /api/notifications/:id/read
+    findOne({ _id, userId }) — userId check prevents reading others' notifications
+    PUT /api/notifications/mark-all-read
+    updateMany({ userId, isRead: false }, { $set: { isRead: true } })
+
+------------------------------------------------------------------------
+Q42. How does the Admin dashboard aggregate data?
+------------------------------------------------------------------------
+
+ANSWER:
+  GET /api/admin/dashboard fires 5 parallel queries using Promise.all:
+
+    const [totalUsers, totalOrders, pendingOrders, revenueResult, lowStockProducts] =
+      await Promise.all([
+        User.countDocuments(),
+        Order.countDocuments(),
+        Order.countDocuments({ status: 'pending' }),
+        Order.aggregate([
+          { $match: { paymentStatus: 'completed' } },
+          { $group: { _id: null, total: { $sum: '$totalAmount' } } }
+        ]),
+        inventoryService.getLowStockProducts()
+      ]);
+
+  Revenue calculation:
+    Only orders where paymentStatus === 'completed' are summed.
+    Orders that are 'pending' or 'cancelled' are excluded.
+    This is the correct financial metric — only confirmed revenue.
+
+  Promise.all benefit:
+    All 5 queries execute concurrently.
+    Total wait time ≈ slowest single query, not sum of all queries.
+    Without Promise.all: 5 sequential queries → 5x slower.
+
+------------------------------------------------------------------------
+Q43. What is the sales analytics aggregation pipeline?
+------------------------------------------------------------------------
+
+ANSWER:
+  GET /api/admin/analytics/sales returns two aggregations:
+
+  1. SALES BY DAY:
+    Order.aggregate([
+      { $match: { paymentStatus: 'completed', ...dateFilter } },
+      { $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          revenue: { $sum: '$totalAmount' },
+          orderCount: { $sum: 1 }
+      }},
+      { $sort: { _id: 1 } },
+      { $project: { _id: 0, date: '$_id', revenue: 1, orderCount: 1 } }
+    ])
+    Output: [{ date: '2025-01-15', revenue: 450.00, orderCount: 3 }, ...]
+
+  2. TOP PRODUCTS (by revenue):
+    Order.aggregate([
+      { $match: { paymentStatus: 'completed' } },
+      { $unwind: '$items' },           // flatten items array
+      { $group: {
+          _id: '$items.productId',
+          name: { $first: '$items.name' },
+          totalQuantity: { $sum: '$items.quantity' },
+          totalRevenue: { $sum: '$items.totalPrice' }
+      }},
+      { $sort: { totalRevenue: -1 } },
+      { $limit: 10 }
+    ])
+
+  $unwind is key: it deconstructs the items array so each item
+  becomes its own document for grouping purposes.
+
+  Date range filter:
+    if (startDate) matchStage.createdAt.$gte = new Date(startDate)
+    if (endDate)   matchStage.createdAt.$lte = new Date(endDate)
+
+================================================================================
+  PART 11 — SYSTEM DESIGN & SCALABILITY
+================================================================================
+
+------------------------------------------------------------------------
+Q44. How would you scale this API to handle 10x traffic?
+------------------------------------------------------------------------
+
+ANSWER:
+  Current architecture:
+    Single Node.js process + MongoDB Atlas + in-process node-cache
+
+  Scale-out steps:
+
+  1. HORIZONTAL SCALING (immediate):
+     Run N instances behind a load balancer (AWS ALB, Nginx).
+     Node.js is stateless (JWT, no server-side sessions) → safe to scale.
+
+  2. REPLACE node-cache WITH REDIS:
+     All instances share one cache.
+     Solves cache inconsistency across workers.
+     Redis also handles rate limiting (express-rate-limit + ioredis).
+
+  3. DATABASE OPTIMIZATION:
+     Add indexes for frequent query patterns.
+     Use MongoDB Atlas read replicas for heavy read workloads.
+     Move analytics queries to a replica to not impact writes.
+
+  4. ASYNC PROCESSING:
+     Move Stripe PaymentIntent creation to a background job (BullMQ).
+     Move email/notification sending to a queue worker.
+     Checkout response time drops from ~800ms to ~200ms.
+
+  5. CDN FOR PRODUCT IMAGES:
+     Product images currently stored as URLs. At scale, use S3 + CloudFront.
+
+  6. CONNECTION POOLING:
+     Mongoose connection pool (default 5). Increase for high concurrency.
+
+------------------------------------------------------------------------
+Q45. How would you handle database migrations in this project?
+------------------------------------------------------------------------
+
+ANSWER:
+  Mongoose does not have a migration system (unlike SQL).
+  Schema changes are applied immediately when the app boots.
+
+  Risks without migrations:
+    - Add a required field → existing documents fail validation
+    - Rename a field → all old documents have the old field name
+    - Add an index → large collection index build blocks reads
+
+  Migration strategy:
+
+  1. ADDITIVE CHANGES (safe):
+     Add a new optional field → old documents have it undefined.
+     Add an index → use { background: true }.
+
+  2. BREAKING CHANGES (risky):
+     Rename/remove a field: write a migration script that updates
+     all existing documents before deploying the new code.
+
+  3. MIGRATION SCRIPTS:
+     Similar to seed.js — scripts that run once and are idempotent.
+     Track applied migrations in a 'migrations' collection
+     (same concept as SQL migration tables).
+
+  4. ZERO-DOWNTIME STRATEGY:
+     Phase 1: add new field alongside old field (backward compatible)
+     Phase 2: deploy code that writes to both fields
+     Phase 3: backfill all old documents
+     Phase 4: deploy code that reads from new field only
+     Phase 5: remove old field
+
+------------------------------------------------------------------------
+Q46. How would you add API versioning to this project?
+------------------------------------------------------------------------
+
+ANSWER:
+  Current: /api/products
+  Versioned: /api/v1/products
+
+  Implementation in Express:
+
+  Option 1 — URI Path versioning (simplest, most common):
+    // src/routes/index.js
+    import v1Routes from './v1/index.js';
+    import v2Routes from './v2/index.js';
+    router.use('/v1', v1Routes);
+    router.use('/v2', v2Routes);
+
+  Option 2 — Accept-Version header:
+    app.use((req, res, next) => {
+      const version = req.headers['accept-version'] || '1';
+      req.apiVersion = version;
+      next();
+    });
+
+  When to version:
+    - Breaking changes to response shape
+    - Removing a field
+    - Changing authentication mechanism
+    Non-breaking additions don't need a new version.
+
+  Swagger update:
+    In swagger.js, add servers for each version:
+      servers: [
+        { url: 'http://localhost:5000/api/v1', description: 'V1' },
+        { url: 'http://localhost:5000/api/v2', description: 'V2' }
+      ]
+
+================================================================================
+  PART 12 — ADDITIONAL SENIOR CONCEPTS
+================================================================================
+
+------------------------------------------------------------------------
+Q47. What is the purpose of the seed script? How is it idempotent?
+------------------------------------------------------------------------
+
+ANSWER:
+  Purpose:
+    Populates the database with realistic test data for development,
+    staging, and demo environments.
+
+    Creates: 3 users (admin/seller/customer), 4 categories, 12 products,
+    3 promotions, reviews, wishlist entries, and 2 sample orders.
+
+  Idempotency:
+    Each seed block checks before inserting:
+      const adminExists = await User.findOne({ email: 'admin@ecommerce.com' });
+      if (!adminExists) {
+        await User.create({ email: 'admin@ecommerce.com', ... });
+      }
+
+    Running npm run seed twice does not duplicate data.
+
+  Run command:
+    npm run seed
+    (script in package.json points to node src/utils/seed.js)
+
+  Seeded credentials:
+    admin@ecommerce.com    / Password@123  (role: admin)
+    seller@ecommerce.com   / Password@123  (role: seller)
+    customer@ecommerce.com / Password@123  (role: customer)
+
+------------------------------------------------------------------------
+Q48. How does the error middleware differentiate between operational
+     errors and programming errors?
+------------------------------------------------------------------------
+
+ANSWER:
+  OPERATIONAL ERRORS (expected, handled):
+    - User not found → 404
+    - Invalid credentials → 401
+    - Insufficient stock → 400
+    These are thrown deliberately with err.statusCode set.
+
+    In services:
+      const err = new Error('Order not found');
+      err.statusCode = 404;
+      throw err;
+
+    Error middleware handles:
+      if (err.statusCode) return apiError(res, err.message, err.statusCode)
+
+  PROGRAMMING ERRORS (unexpected bugs):
+    - TypeError: Cannot read property of undefined
+    - ReferenceError: variable not defined
+    These have no err.statusCode.
+
+    Error middleware handles:
+      if (env.nodeEnv === 'production')
+        return apiError(res, 'Internal Server Error', 500)
+      else
+        return apiError(res, err.message, 500)
+
+  In production: stack trace hidden from client (security).
+  In development: full message shown (debugging).
+  In both: pino logs the full error with stack trace.
+
+------------------------------------------------------------------------
+Q49. What is the cart enrichment and why is it computed on read?
+------------------------------------------------------------------------
+
+ANSWER:
+  Raw cart in MongoDB:
+    items: [{ productId: ObjectId, quantity: 3 }]
+
+  Enriched cart returned to client:
+    items: [
+      {
+        productId: { _id, name, price, salePrice, stockQty },
+        quantity: 3,
+        effectivePrice: 89.99,     // salePrice ?? price
+        lineTotal: 269.97,         // effectivePrice * quantity
+        inStock: true              // stockQty >= quantity
+      }
+    ],
+    cartTotal: 269.97
+
+  Why computed on read:
+    Prices change. A product's price today may differ from when
+    it was added to cart. Computing on read ensures the cart always
+    shows current prices.
+
+    inStock is also computed live — stock changes between add-to-cart
+    and checkout. The UI can warn "item no longer in stock" before
+    the user attempts checkout.
+
+  effectivePrice logic:
+    If a product has a salePrice (promotional price), use salePrice.
+    Otherwise use the regular price.
+    Null coalescing: product.salePrice ?? product.price
+
+------------------------------------------------------------------------
+Q50. How would you add real-time features (live order tracking) to
+     this API?
+------------------------------------------------------------------------
+
+ANSWER:
+  Current: client polls GET /api/notifications every N seconds.
+
+  Problem at scale:
+    100,000 users × every 10 seconds = 10,000 requests/second
+    Each request: authenticate + MongoDB query + response.
+
+  Better option 1 — SERVER-SENT EVENTS (SSE):
+    One-way push from server to client.
+    Long-lived HTTP connection.
+    Native browser EventSource API.
+
+    Implementation:
+      GET /api/notifications/stream
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        // On DB change → res.write('data: {...}\n\n')
+
+    Good for: notification feeds, order status updates.
+
+  Better option 2 — WEBSOCKETS (Socket.io):
+    Full duplex — client and server can both send.
+    Higher setup complexity.
+    Good for: live chat, collaborative features.
+
+  Better option 3 — PUSH NOTIFICATIONS:
+    Web Push API (for PWA) or Firebase Cloud Messaging.
+    Works even when the browser/app is closed.
+
+  At this API's scale: SSE is the right next step.
+  Plug Socket.io in when you need bidirectional communication.
+
+------------------------------------------------------------------------
+Q51. What is Promise.all and why is it used in getDashboard?
+------------------------------------------------------------------------
+
+ANSWER:
+  Promise.all([ p1, p2, p3 ]) takes an array of Promises and:
+    - Runs all of them concurrently
+    - Resolves when ALL resolve, with an array of results
+    - Rejects immediately if ANY rejects (fail-fast)
+
+  In getDashboard:
+    const [totalUsers, totalOrders, pendingOrders, revenueResult, lowStock] =
+      await Promise.all([
+        User.countDocuments(),
+        Order.countDocuments(),
+        Order.countDocuments({ status: 'pending' }),
+        Order.aggregate([...]),
+        inventoryService.getLowStockProducts()
+      ]);
+
+  Sequential (without Promise.all):
+    Total time = sum of all query times
+    e.g., 50ms + 60ms + 55ms + 100ms + 80ms = 345ms
+
+  Parallel (with Promise.all):
+    Total time = slowest single query
+    e.g., max(50, 60, 55, 100, 80) = 100ms
+
+  The dashboard is 3.45x faster because none of these queries
+  depend on each other's results.
+
+  Warning: Promise.all fails all-or-nothing. If getLowStockProducts
+  throws, the entire dashboard fails. Consider Promise.allSettled
+  if partial results are acceptable.
+
+------------------------------------------------------------------------
+Q52. How would you implement logging in production vs development?
+------------------------------------------------------------------------
+
+ANSWER:
+  This project uses Pino (structured logging library).
+
+  Development (pino-pretty):
+    Colorized, human-readable output:
+      [10:25:31.123] INFO: Server started on port 5000
+      [10:25:32.456] INFO: GET /api/products 200 45ms
+
+  Production (plain JSON):
+    Machine-parseable, log aggregator-friendly:
+      {"level":30,"time":1706266732456,"msg":"GET /api/products","status":200,"responseTime":45}
+
+  Why JSON in production:
+    Log aggregators (Datadog, ELK, CloudWatch) parse structured JSON.
+    You can query: all ERROR logs from the last hour, or
+    all requests where responseTime > 1000ms.
+
+  What pino-http logs automatically per request:
+    method, url, status code, response time, req.id (trace ID)
+
+  Additional fields to add in production:
+    userId (from req.user.id — know which user caused an error)
+    orderId, requestId (correlate logs across services)
+    environment, hostname (know which instance logged it)
+
+------------------------------------------------------------------------
+Q53. What is the difference between 401 Unauthorized and 403 Forbidden?
+------------------------------------------------------------------------
+
+ANSWER:
+  401 UNAUTHORIZED:
+    The request lacks valid authentication credentials.
+    "I don't know who you are."
+    - No token provided
+    - Token is malformed or expired
+    - Invalid signature
+
+    Fix: log in to get a valid token.
+
+  403 FORBIDDEN:
+    The request is authenticated but the user lacks permission.
+    "I know who you are, but you can't do this."
+    - Customer trying to access admin route
+    - Inactive/deactivated account trying to log in
+    - User trying to delete another user's review
+
+    Fix: need a different role or different account.
+
+  In this project:
+    authenticate middleware → 401 (no/bad token)
+    authorise middleware   → 403 (wrong role)
+    login with isActive=false → 403 (account deactivated)
+
+------------------------------------------------------------------------
+Q54. How does the wishlist duplicate guard work?
+------------------------------------------------------------------------
+
+ANSWER:
+  In wishlist.service.js addToWishlist():
+
+  Step 1: Check product exists and is active:
+    const product = await Product.findOne({ _id: productId, isActive: true });
+    if (!product) throw 404;
+
+  Step 2: Check not already in wishlist:
+    The $addToSet operator is used in findOneAndUpdate — it only adds
+    if the value is not already in the array.
+
+    await Wishlist.findOneAndUpdate(
+      { userId },
+      { $addToSet: { productIds: productId } },
+      { upsert: true, new: true }
+    );
+
+    But to return a 409, a check is done first:
+    const wishlist = await Wishlist.findOne({ userId });
+    if (wishlist?.productIds.includes(productId)) throw 409;
+
+  Alternative: use $addToSet and check if the array length changed.
+  The explicit 409 approach gives a clearer client message.
+
+------------------------------------------------------------------------
+Q55. What happens when you use .lean() in Mongoose queries?
+------------------------------------------------------------------------
+
+ANSWER:
+  Without .lean():
+    Product.find() returns Mongoose Document objects.
+    These are rich objects with: save(), update(), toObject(),
+    change tracking, virtual fields, etc.
+
+  With .lean():
+    Product.find().lean() returns plain JavaScript objects (POJOs).
+    Roughly 2-3x faster, lower memory usage.
+    No Mongoose Document overhead.
+
+  When to use .lean():
+    - Read-only operations (listing, fetching for API response)
+    - Large result sets
+    - When you don't need save(), update(), or virtuals
+
+  When NOT to use .lean():
+    - When you need to call document.save() after modification
+    - When you need instance methods (e.g., user.comparePassword())
+    - When you rely on virtual fields
+
+  Project examples:
+    getUserOrders: Order.find({ userId }).lean()         ← read only
+    cancelOrder:   Order.findOne({ _id, userId })        ← needs .save()
+    login:         User.findOne().select('+passwordHash')← needs comparePassword()
+
+------------------------------------------------------------------------
+Q56. How would you implement a webhook handler for Stripe in this API?
+------------------------------------------------------------------------
+
+ANSWER:
+  Stripe webhooks notify your server of payment events asynchronously.
+  More reliable than polling because:
+    - Works even if the user closes the browser after payment
+    - Stripe retries on failure
+    - Single source of truth for payment status
+
+  Implementation:
+
+  1. Raw body parser (required for Stripe signature verification):
+    app.post('/api/stripe/webhook',
+      express.raw({ type: 'application/json' }),
+      stripeWebhookHandler
+    );
+    Note: express.json() must NOT be used here (needs raw buffer).
+
+  2. Signature verification:
+    const sig = req.headers['stripe-signature'];
+    const event = stripe.webhooks.constructEvent(
+      req.body,           // raw Buffer
+      sig,
+      env.stripeWebhookSecret
+    );
+
+  3. Handle events:
+    switch (event.type) {
+      case 'payment_intent.succeeded':
+        await orderService.markPaymentComplete(event.data.object.metadata.orderId);
+        break;
+      case 'payment_intent.payment_failed':
+        await orderService.markPaymentFailed(event.data.object.metadata.orderId);
+        break;
+    }
+
+  4. Idempotency:
+    Stripe may send the same event twice. Always check current order
+    status before updating to avoid double-processing.
+
+------------------------------------------------------------------------
+Q57. How do you handle environment-specific configuration in this project?
+------------------------------------------------------------------------
+
+ANSWER:
+  Configuration is managed via .env and src/config/env.js.
+
+  env.js validates and exports a typed config object:
+    import 'dotenv/config';
+
+    function required(key) {
+      if (!process.env[key]) throw new Error(`Missing required env: ${key}`);
+      return process.env[key];
+    }
+
+    export const env = {
+      port: process.env.PORT || 5000,
+      nodeEnv: process.env.NODE_ENV || 'development',
+      mongoUri: required('MONGODB_URI'),
+      jwtSecret: required('JWT_SECRET'),
+      jwtRefreshSecret: required('JWT_REFRESH_SECRET'),
+      jwtExpiresIn: process.env.JWT_EXPIRES_IN || '60m',
+      stripeSecretKey: process.env.STRIPE_SECRET_KEY || '',
+      cacheTtl: Number(process.env.CACHE_TTL) || 300,
+      ...
+    };
+
+  Benefits:
+    - Fails fast on startup if required vars are missing
+    - Single import throughout the codebase (import { env } from '../config/env.js')
+    - Type coercions in one place (Number(CACHE_TTL))
+    - No process.env scattered across the codebase
+
+  Production vs Development:
+    NODE_ENV=production → Pino outputs JSON, errors hide stack traces
+    NODE_ENV=development → Pino pretty-prints, full error messages
+
+------------------------------------------------------------------------
+Q58. What is the purpose of the orderNumber field separate from _id?
+------------------------------------------------------------------------
+
+ANSWER:
+  _id (MongoDB ObjectId):
+    Internal DB identifier: 507f1f77bcf86cd799439011
+    Hexadecimal, opaque, not user-friendly
+    Used for DB queries and relations
+
+  orderNumber (human-readable):
+    Format: ORD-1706266732456-4823
+    Displayed in emails, notifications, support tickets
+    Easy to communicate verbally: "My order is ORD-xxx"
+
+  Why not use _id as order number:
+    ObjectIds are 24-char hex strings — not user-friendly.
+    Customers should never see raw database identifiers.
+
+  Current limitation:
+    ORD-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}
+    Collision risk at high volume: same millisecond + same 4-digit random.
+    Fix: use a counter (MongoDB sequence) or ULID (lexicographically sortable UUID).
+
+------------------------------------------------------------------------
+Q59. How does the category hierarchy work? How are subcategories modeled?
+------------------------------------------------------------------------
+
+ANSWER:
+  Self-referential model (Adjacency List pattern):
+    category.model.js:
+      parentId: { type: ObjectId, ref: 'Category', default: null }
+
+  Top-level categories: parentId = null
+  Subcategories: parentId = ObjectId of parent
+
+  Examples:
+    Electronics (parentId: null)
+      Smartphones (parentId: Electronics._id)
+      Laptops     (parentId: Electronics._id)
+    Clothing (parentId: null)
+      Men    (parentId: Clothing._id)
+      Women  (parentId: Clothing._id)
+
+  Fetching with subcategories:
+    getAll() → find({ parentId: null }) then populate subcategories
+    (or aggregate with $lookup for nested tree)
+
+  getSubcategories(parentId):
+    Category.find({ parentId })
+
+  Limitation:
+    Adjacency List is simple but requires N queries for N-level trees.
+    For deeper hierarchies, use Materialized Paths or Nested Sets.
+    For this e-commerce API (2 levels max), Adjacency List is correct.
+
+------------------------------------------------------------------------
+Q60. If you were to improve this project for production deployment,
+     what would be your top 5 priorities?
+------------------------------------------------------------------------
+
+ANSWER:
+  1. REPLACE node-cache WITH REDIS
+     Shared cache across multiple instances.
+     Also use Redis for rate limiting and session management.
+     Impact: correct behavior in any clustered/scaled deployment.
+
+  2. ADD REFRESH TOKEN ROTATION
+     Issue a new refresh token on every /refresh-token call.
+     Invalidate the previous one.
+     Add a refreshTokenVersion field to User for logout-everywhere.
+     Impact: prevents refresh token theft exploitation.
+
+  3. IMPLEMENT STRIPE WEBHOOKS
+     Replace manual processPayment polling with Stripe event push.
+     Add idempotency key storage to prevent double-processing.
+     Impact: reliable payment confirmation even if client disconnects.
+
+  4. ADD STRUCTURED ERROR TRACKING
+     Integrate Sentry or Datadog APM.
+     Current error handling logs to pino but no alerting.
+     Impact: know about production errors before users report them.
+
+  5. MAKE CHECKOUT TRANSACTIONAL
+     Wrap Order.create + Cart.clear in a MongoDB session transaction
+     (requires replica set, already available on MongoDB Atlas).
+     Add order status state machine to prevent invalid transitions.
+     Impact: no orphaned orders or ghost inventory on server crash.
+
+================================================================================
+  QUICK REFERENCE: KEY NUMBERS & FACTS FROM THIS PROJECT
+================================================================================
+
+  JWT access token TTL          :  60 minutes
+  JWT refresh token TTL         :  7 days
+  bcrypt salt rounds            :  12
+  Default cache TTL             :  300 seconds (5 minutes)
+  Default rate limit            :  100 requests / minute / IP
+  Tax rate                      :  18%
+  Free shipping threshold       :  order subtotal > $500
+  Fixed shipping cost           :  $50 (if subtotal <= $500)
+  Low stock threshold           :  stockQty <= 10
+  Max notifications returned    :  50 (latest, sorted desc)
+  Max products per page         :  100 (pageSize max)
+  Default page size             :  10
+  Rating range                  :  1 to 5
+  Featured product threshold    :  averageRating >= 4.0
+  Featured product limit        :  10
+  Related products limit        :  5
+  Top products in analytics     :  10 (by revenue)
+  Order number format           :  ORD-{timestamp}-{4digitRandom}
+  Roles                         :  admin, seller, customer
+  Order statuses                :  pending, confirmed, processing,
+                                   shipped, delivered, cancelled,
+                                   returned, refunded
+  Payment statuses              :  pending, completed, failed,
+                                   cancelled, refunded
+  Promotion types               :  percentage, fixed_amount, free_shipping
+  Notification types            :  order, payment, shipping, promotion, system
+
+================================================================================
+  END OF FAQS2.TXT  |  60 Questions + Answers  |  Senior Node.js Backend
+================================================================================

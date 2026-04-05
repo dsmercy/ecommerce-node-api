@@ -1,0 +1,461 @@
+================================================================================
+  ECOMMERCE NODE API — SENIOR & ARCHITECT LEVEL INTERVIEW QUESTIONS
+================================================================================
+
+
+================================================================================
+  1. ARCHITECTURE & DESIGN PATTERNS
+================================================================================
+
+SENIOR
+------
+
+Q1. The project uses a Controller → Service → Model layered architecture. What
+    concrete problems does this solve, and where would you draw the line between
+    what belongs in a controller versus a service? Give a specific example from
+    this codebase where someone might be tempted to break that boundary.
+
+Q2. src/utils/response.js enforces a single JSON envelope
+    { success, message, data, errors, timestamp } on every response. What are
+    the trade-offs of this pattern versus returning raw data with HTTP status
+    codes alone? How does this interact with frontend error handling?
+
+Q3. The validate.middleware.js factory accepts a target parameter (body, query,
+    params). Why is this important, and what would happen if you always validated
+    against req.body? Give a route in this project where the wrong target would
+    cause a silent failure.
+
+Q4. ESM ("type": "module") is used throughout. What are the concrete implications
+    for dynamic imports, circular dependencies, and Jest configuration compared to
+    CommonJS? Why does this project need --experimental-vm-modules for tests?
+
+Q5. node-cache is used as an in-process singleton. What is the key architectural
+    constraint this imposes, and when would you be forced to replace it with Redis?
+
+
+ARCHITECT
+---------
+
+Q6. This API follows a monolithic service structure. At what scale or team size
+    would you decompose it into microservices, and which bounded contexts would
+    you split first — Orders, Inventory, Notifications, or Auth? Justify your
+    choice based on the data coupling visible in this codebase.
+
+Q7. The codebase has order.service.js importing from inventory.service.js,
+    promotion.service.js, payment.service.js, and notification.service.js. Draw
+    the dependency graph for the order creation flow and identify what patterns
+    (orchestration vs. choreography, saga, outbox) would improve its resilience
+    at scale.
+
+Q8. All database queries go directly from service → Mongoose model. What would
+    you need to add to introduce a Repository pattern, and is that abstraction
+    worth the overhead in a Node/Mongoose stack? When would it be?
+
+
+================================================================================
+  2. NODE.JS RUNTIME & EXPRESS
+================================================================================
+
+SENIOR
+------
+
+Q9.  src/app.js uses top-level await to call connectDB(). What Node.js version is
+     required, why does it work in ESM but not CommonJS, and what happens to the
+     HTTP server if the MongoDB connection hangs for 30 seconds during startup?
+
+Q10. The middleware chain in app.js is ordered:
+     pino-http → cors → express.json → rate-limit → routes → error handler.
+     Why must the error handler be last? What breaks if you place cors after route
+     mounting? What breaks if express.json() comes after validation middleware?
+
+Q11. pino-http is used for request logging. What does it log that console.log
+     inside a controller does not, and why does structured JSON logging matter in
+     a production environment?
+
+Q12. The authorise(...roles) middleware uses rest parameters. Explain how
+     authorise('admin', 'seller') differs from chaining two separate
+     authorise('admin') and authorise('seller') middlewares.
+
+
+ARCHITECT
+---------
+
+Q13. Express is single-threaded but I/O is non-blocking. Walk through what
+     happens at the event loop level when 100 concurrent requests hit
+     POST /api/orders/checkout, each requiring 5 MongoDB operations, a Stripe
+     API call, and a notification write. Where are the bottlenecks?
+
+Q14. The project uses node --watch for development. What are its limitations
+     versus nodemon, and why does neither belong in a production process manager?
+     What would you use instead, and how does clustering affect the in-process
+     node-cache singleton?
+
+
+================================================================================
+  3. MONGODB & MONGOOSE
+================================================================================
+
+SENIOR
+------
+
+Q15. Cart uses findOneAndUpdate with upsert: true and $inc / $push operators.
+     Why is this safer than findOne → modify → save() for concurrent requests?
+     Name a scenario in this cart service where a race condition could still occur.
+
+Q16. The Review model has a compound unique index { productId: 1, userId: 1 }.
+     When Mongoose throws a duplicate key error (code 11000), the error middleware
+     maps it to 409. Walk through the exact error object structure that Mongoose
+     surfaces and how the error middleware extracts the field name from it.
+
+Q17. Order.items uses _id: false on the subdocument array. What does this prevent,
+     and what capability do you lose by disabling it?
+
+Q18. Product.averageRating is denormalized onto the product document and
+     recalculated via aggregation on every review change. Compare this to a
+     real-time $lookup aggregation. When does denormalization win, and what
+     consistency risk does it introduce here?
+
+Q19. User has passwordHash and refreshToken with select: false. Explain exactly
+     what select: false does at the driver level, when you need
+     .select('+passwordHash'), and what would go wrong in login() if you forgot
+     the plus sign.
+
+
+ARCHITECT
+---------
+
+Q20. The product list cache uses 'products:' + JSON.stringify(query) as a key.
+     Describe three scenarios where this strategy causes cache pollution, cache
+     misses, or stale data. How would you redesign the cache key scheme?
+
+Q21. recalculateRating is called synchronously after every review create, approve,
+     and delete. At 10,000 concurrent review operations, what happens to MongoDB
+     write throughput? Propose an alternative architecture (eventual consistency,
+     write-behind cache, change streams) and explain its consistency trade-offs.
+
+Q22. The Order model stores an item snapshot (name, unitPrice, totalPrice) instead
+     of just a productId reference. Why is this critical for e-commerce, and what
+     problem would occur if you used populate() instead? How does this relate to
+     event sourcing?
+
+
+================================================================================
+  4. AUTHENTICATION & SECURITY
+================================================================================
+
+SENIOR
+------
+
+Q23. refreshToken() in auth.service.js does NOT rotate the refresh token on use.
+     What security vulnerability does this create, and what is the standard
+     mitigation (refresh token rotation + reuse detection)? What additional state
+     would you need in the User model?
+
+Q24. The authenticate middleware attaches req.user = { id, email, role } from the
+     JWT payload without querying the database. What are the performance benefits?
+     What security scenarios does this miss that a database lookup on every request
+     would catch?
+
+Q25. bcryptjs uses 12 salt rounds. What is the time cost of 12 rounds versus 10
+     on your hardware, why does this matter, and what attack does bcrypt's work
+     factor defend against?
+
+Q26. The authorise middleware checks req.user.role from the JWT payload, not from
+     the database. If an admin deactivates a seller and that seller has a valid
+     60-minute JWT, what happens? How would you fix this without querying the
+     database on every request?
+
+Q27. The .env file stores JWT_SECRET and STRIPE_SECRET_KEY. In a production
+     Kubernetes deployment, what is the proper way to inject these, and what is
+     wrong with baking them into a Docker image or a CI/CD environment variable
+     visible in build logs?
+
+
+ARCHITECT
+---------
+
+Q28. The current auth model uses stateless JWTs with a 60-minute access token.
+     Design an immediate revocation mechanism (e.g., for compromised accounts or
+     logout-everywhere) without abandoning stateless JWTs entirely. What
+     infrastructure does your solution require?
+
+Q29. Evaluate the OWASP Top 10 against this codebase. Which vulnerabilities are
+     already mitigated, which are partially mitigated, and which are unaddressed?
+     Focus specifically on Injection, Broken Access Control, and Security
+     Misconfiguration.
+
+
+================================================================================
+  5. INVENTORY & ORDER INTEGRITY
+================================================================================
+
+SENIOR
+------
+
+Q30. reserveStock uses findOneAndUpdate with
+     { _id: productId, stockQty: { $gte: quantity } } as the filter. Why is this
+     a correct atomic check-and-decrement, and why would a two-step
+     findOne → update be wrong here?
+
+Q31. The order creation loop reserves stock item by item and rolls back on partial
+     failure. Is this a distributed transaction? What consistency guarantees does
+     it actually provide, and under what failure scenario (e.g., server crash after
+     reserving 3 of 5 items) does the rollback NOT execute?
+
+Q32. cancelOrder calls releaseStock for each item sequentially. If one releaseStock
+     call fails midway, what is the state of the inventory? How would you make
+     this operation more resilient?
+
+Q33. After createOrder clears the cart, the Stripe createPaymentIntent call is
+     made. If Stripe throws, the order exists but has no clientSecret. The catch
+     block logs a warning and returns the order anyway. Evaluate this design
+     decision — when is graceful degradation appropriate versus when should it
+     roll back?
+
+
+ARCHITECT
+---------
+
+Q34. The current system has no outbox pattern or event log. If the server crashes
+     between "Order created" and "Cart cleared", or between "Cart cleared" and
+     "Stripe PaymentIntent created", what is the data state? Design a minimal
+     outbox or saga pattern to make checkout idempotent and crash-safe.
+
+Q35. At 10,000 orders/day, the ORD-${Date.now()}-${4digitRandom} generation
+     strategy has a collision probability. Calculate it and propose a
+     production-grade order number generation strategy (Snowflake ID, ULID,
+     database sequence, etc.).
+
+
+================================================================================
+  6. CACHING
+================================================================================
+
+SENIOR
+------
+
+Q36. searchProducts caches results using 'products:' + JSON.stringify(query).
+     After a product is updated, _invalidateListCache() deletes all keys starting
+     with 'products:'. Why is this a cache stampede risk, and what pattern
+     (stale-while-revalidate, probabilistic early expiration) mitigates it?
+
+Q37. inventory.service.js calls deleteCache('product:' + productId) after stock
+     changes. Under what conditions would you see stale stock data, and why is
+     this cache invalidation fire-and-forget but still correct?
+
+Q38. node-cache is in-process. If you run 4 Node.js worker processes with cluster,
+     describe the cache consistency problem. What read/write patterns would produce
+     incorrect inventory displays?
+
+
+================================================================================
+  7. PAYMENTS & STRIPE
+================================================================================
+
+SENIOR
+------
+
+Q39. createPaymentIntent stores paymentIntentId on the Order document.
+     processPayment verifies the stored ID matches the request before calling
+     Stripe. What attack does this check prevent?
+
+Q40. The codebase wraps Stripe calls in try/catch and gracefully degrades. What is
+     the difference between graceful degradation appropriate for createPaymentIntent
+     at order creation versus processPayment at actual payment confirmation? Should
+     both degrade the same way?
+
+Q41. Stripe webhooks are in .env.example (STRIPE_WEBHOOK_SECRET) but not
+     implemented. Why are webhooks more reliable than processPayment polling for
+     confirming payment success, and what idempotency issues must a webhook handler
+     address?
+
+
+ARCHITECT
+---------
+
+Q42. The current flow is: checkout → create Stripe PaymentIntent → client confirms
+     payment → POST /orders/:id/payment. In a high-fraud environment, what
+     additional Stripe features (Radar, 3D Secure, payment method restrictions)
+     would you integrate, and how would they change the API contract with the
+     frontend?
+
+
+================================================================================
+  8. NOTIFICATIONS & ASYNC PATTERNS
+================================================================================
+
+SENIOR
+------
+
+Q43. Notification sends in order.service.js use .catch(() => {}) — errors are
+     silently swallowed. What observability do you lose, and how would you improve
+     this without blocking the order response? Consider: structured logging, dead
+     letter queues, metrics counters.
+
+Q44. sendOrderConfirmation is called synchronously within order creation. If the
+     notification service starts taking 500ms due to MongoDB pressure, what is the
+     impact on checkout response time? How would a message queue (BullMQ, RabbitMQ)
+     solve this?
+
+
+ARCHITECT
+---------
+
+Q45. The notification system uses polling (GET /api/notifications). At 100,000
+     active users polling every 10 seconds, calculate the request rate and MongoDB
+     query rate. Compare this to Server-Sent Events (SSE) and WebSocket approaches
+     for real-time notifications, and justify which you would implement at each
+     scale tier.
+
+
+================================================================================
+  9. API DESIGN & REST
+================================================================================
+
+SENIOR
+------
+
+Q46. GET /api/admin/:id is declared before GET /api/:id in order.routes.js.
+     Explain exactly what route collision occurs if the order is reversed, why
+     Express matches routes in declaration order, and whether this is a code smell
+     or an acceptable pattern.
+
+Q47. The API returns 200 OK for DELETE /api/cart and
+     DELETE /api/wishlist/items/:productId. REST purists argue 204 No Content is
+     more correct. What are the trade-offs, and how does
+     apiResponse(res, null, 'message') signal the difference to a frontend?
+
+Q48. POST /api/orders/checkout creates an order. POST /api/orders/:id/cancel
+     cancels it. Why is cancel a POST instead of DELETE /api/orders/:id, and what
+     REST constraint justifies this?
+
+
+ARCHITECT
+---------
+
+Q49. The API has no versioning (/api/v1/). Describe three versioning strategies
+     (URI path, header, query param) and explain which you would add to this
+     project, how you would implement it in Express, and how it affects the Swagger
+     documentation.
+
+Q50. The productSearchSchema supports tags as a comma-separated string converted
+     to an array. Why is this a pragmatic REST decision over ?tags[]=a&tags[]=b,
+     and what Joi transformation handles the conversion? Where does this
+     transformation happen in the middleware pipeline?
+
+
+================================================================================
+  10. TESTING STRATEGY
+================================================================================
+
+SENIOR
+------
+
+Q51. The test suite uses Jest + Supertest. Supertest boots the actual Express app
+     in-process. What is the difference between integration tests (as used here)
+     and unit tests, and why does testing order.service.js via HTTP through the
+     full middleware stack give you more confidence than mocking Mongoose?
+
+Q52. The Phase 6 test had a false positive: the "empty cart" test passed because
+     the cart had leftover items from a previous session. What test design principle
+     does this violate, and how does afterEach cleanup fix it? Why is test
+     isolation harder in integration tests than unit tests?
+
+Q53. tests/setup.js connects to a test MongoDB. If MONGODB_URI_TEST is not set,
+     it falls back to appending '-test' to MONGODB_URI. What could go wrong if a
+     developer accidentally runs tests against the production URI, and how would
+     you prevent this?
+
+
+ARCHITECT
+---------
+
+Q54. The project has no contract tests (Pact/Dredd). If a frontend team consumes
+     this API, what is the risk of breaking changes when you update the response
+     envelope, rename a field, or change an error code? How would consumer-driven
+     contract testing address this?
+
+Q55. At what point in the CI/CD pipeline would you run: unit tests, integration
+     tests (MongoDB in Docker), end-to-end tests (full stack), and load tests
+     (k6/Artillery)? Justify the placement of each based on cost, speed, and
+     failure signal value.
+
+
+================================================================================
+  11. PRODUCTION READINESS & DEVOPS
+================================================================================
+
+SENIOR
+------
+
+Q56. The rate limiter is applied globally in app.js. Why is a global rate limit
+     insufficient for protecting POST /api/auth/login specifically? What additional
+     rate limiting strategy would you apply to auth routes?
+
+Q57. pino outputs JSON logs in production. What fields beyond the defaults
+     (level, time, msg) would you add to every log line to make them useful in a
+     log aggregation system (Datadog, ELK, CloudWatch)? How does pino-http's
+     customProps option help?
+
+Q58. The error.middleware.js hides the error message in production for generic
+     500 errors. What information should a 500 response return to the client versus
+     what should only appear in logs? What is the risk of leaking stack traces?
+
+
+ARCHITECT
+---------
+
+Q59. Design a zero-downtime deployment strategy for this API given: MongoDB Atlas
+     (managed), in-process node-cache (ephemeral), and stateless JWTs. What
+     happens to in-flight requests during a rolling restart, and how does the cache
+     warm-up period affect performance?
+
+Q60. The seed script (npm run seed) is designed to be idempotent. Describe how
+     you would evolve this into a proper database migration strategy (schema
+     changes, index changes, data backups) as the project grows across multiple
+     deployed environments (dev, staging, prod).
+
+
+================================================================================
+  12. BONUS — CODE SMELL & REFACTORING
+================================================================================
+
+Q61. generateOrderNumber() uses Math.random() and Date.now(). Name two production
+     scenarios where this generates duplicates and propose a collision-free
+     alternative.
+
+Q62. createOrder in order.service.js is 90+ lines long. Apply the Single
+     Responsibility Principle — identify 3-4 distinct responsibilities in that
+     function and propose how you would extract them without breaking the atomic
+     rollback behavior.
+
+Q63. The promotion validation (applyPromotion) throws domain errors with
+     err.statusCode. This couples the service layer to HTTP status semantics. How
+     would you redesign error handling to keep services HTTP-agnostic while still
+     allowing controllers to map domain errors to appropriate status codes?
+
+Q64. The admin.controller.js imports User and Order models directly — bypassing
+     the service layer. Is this a violation of the architecture, and under what
+     conditions is it acceptable for controllers to query models directly?
+
+
+================================================================================
+  QUESTION COUNT SUMMARY
+================================================================================
+
+  Section 1  — Architecture & Design Patterns       :  8 questions  (Q1–Q8)
+  Section 2  — Node.js Runtime & Express            :  6 questions  (Q9–Q14)
+  Section 3  — MongoDB & Mongoose                   :  8 questions  (Q15–Q22)
+  Section 4  — Authentication & Security            :  7 questions  (Q23–Q29)
+  Section 5  — Inventory & Order Integrity          :  6 questions  (Q30–Q35)
+  Section 6  — Caching                              :  3 questions  (Q36–Q38)
+  Section 7  — Payments & Stripe                    :  4 questions  (Q39–Q42)
+  Section 8  — Notifications & Async Patterns       :  3 questions  (Q43–Q45)
+  Section 9  — API Design & REST                    :  5 questions  (Q46–Q50)
+  Section 10 — Testing Strategy                     :  5 questions  (Q51–Q55)
+  Section 11 — Production Readiness & DevOps        :  5 questions  (Q56–Q60)
+  Section 12 — Bonus: Code Smell & Refactoring      :  4 questions  (Q61–Q64)
+
+  TOTAL                                             : 64 questions
+
+================================================================================
